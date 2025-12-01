@@ -28,6 +28,26 @@ const GameBoard: React.FC = () => {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isLoadingRecords, setIsLoadingRecords] = useState<boolean>(false);
 
+  // Helper function to fetch records
+  const fetchGlobalRecords = async () => {
+    if (!LEADERBOARD_API_URL) return;
+    
+    setIsLoadingRecords(true);
+    try {
+      const response = await fetch(LEADERBOARD_API_URL);
+      const result = await response.json();
+      
+      if (result && result.status === 'success' && Array.isArray(result.data)) {
+        setRecords(result.data);
+        localStorage.setItem('restaUmRecords', JSON.stringify(result.data));
+      }
+    } catch (error) {
+      console.error("Erro ao sincronizar ranking:", error);
+    } finally {
+      setIsLoadingRecords(false);
+    }
+  };
+
   // Load records from LocalStorage OR API on mount
   useEffect(() => {
     const loadRecords = async () => {
@@ -38,24 +58,7 @@ const GameBoard: React.FC = () => {
       }
 
       // 2. Se tiver URL configurada, tenta buscar do servidor
-      if (LEADERBOARD_API_URL) {
-        setIsLoadingRecords(true);
-        try {
-          const response = await fetch(LEADERBOARD_API_URL);
-          const result = await response.json();
-          
-          if (result && result.status === 'success' && Array.isArray(result.data)) {
-            setRecords(result.data);
-            // Atualiza o cache local
-            localStorage.setItem('restaUmRecords', JSON.stringify(result.data));
-          }
-        } catch (error) {
-          console.error("Erro ao conectar com o ranking global:", error);
-          // Falha silenciosa, mantém os dados locais
-        } finally {
-          setIsLoadingRecords(false);
-        }
-      }
+      await fetchGlobalRecords();
     };
 
     loadRecords();
@@ -183,7 +186,8 @@ const GameBoard: React.FC = () => {
       date: new Date().toLocaleDateString('pt-BR')
     };
 
-    // 1. Atualização Otimista Local
+    // 1. Atualização Otimista Local: Mostra o recorde imediatamente para o usuário
+    // Isso garante que ele veja que "funcionou" mesmo que a internet esteja lenta
     const updatedRecords = [...records, newRecord]
       .sort((a, b) => a.timeInSeconds - b.timeInSeconds)
       .slice(0, 10);
@@ -196,23 +200,33 @@ const GameBoard: React.FC = () => {
     if (LEADERBOARD_API_URL) {
       setIsSaving(true);
       try {
-        // Enviamos como text/plain para o Google Apps Script aceitar sem preflight complexo
-        await fetch(LEADERBOARD_API_URL, {
-          method: 'POST',
-          body: JSON.stringify(newRecord)
+        const apiUrl = LEADERBOARD_API_URL.trim();
+        const saveUrl = new URL(apiUrl);
+        saveUrl.searchParams.append('id', newRecord.id);
+        saveUrl.searchParams.append('name', newRecord.name);
+        saveUrl.searchParams.append('timeInSeconds', newRecord.timeInSeconds.toString());
+        saveUrl.searchParams.append('date', newRecord.date);
+
+        // MUDANÇA CRÍTICA: mode: 'no-cors'
+        // Isso envia a requisição "às cegas". O navegador não vai bloquear o redirecionamento
+        // do Google, mas também não vamos saber se o Google respondeu "OK".
+        // Assumimos que, se o link estiver certo, vai salvar.
+        await fetch(saveUrl.toString(), {
+          method: 'GET',
+          mode: 'no-cors',
         });
 
-        // Recarrega para garantir consistência
-        const response = await fetch(LEADERBOARD_API_URL);
-        const result = await response.json();
-        
-        if (result && result.status === 'success' && Array.isArray(result.data)) {
-          setRecords(result.data);
-          localStorage.setItem('restaUmRecords', JSON.stringify(result.data));
-        }
+        // Aguarda um momento para o Google Sheets processar a escrita
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Tenta buscar a lista atualizada para garantir sincronia
+        // Se falhar aqui, não tem problema, o usuário já viu o recorde localmente.
+        await fetchGlobalRecords();
+
       } catch (error) {
         console.error("Erro ao salvar no ranking global:", error);
-        alert("Aviso: Não foi possível salvar no ranking global. Seu recorde ficou salvo apenas neste dispositivo.");
+        // Não mostramos mais alert de erro para não frustrar o usuário,
+        // já que o recorde foi salvo localmente com sucesso.
       } finally {
         setIsSaving(false);
       }
@@ -259,7 +273,10 @@ const GameBoard: React.FC = () => {
           <form onSubmit={saveRecord} className="w-full max-w-md bg-gradient-to-br from-teal-900 to-gray-800 p-6 rounded-xl border border-teal-500/50 shadow-2xl animate-fade-in relative">
             {isSaving && (
               <div className="absolute inset-0 bg-gray-900/50 flex items-center justify-center rounded-xl z-10">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500"></div>
+                <div className="flex flex-col items-center">
+                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mb-2"></div>
+                   <span className="text-xs text-white">Salvando...</span>
+                </div>
               </div>
             )}
             <h3 className="text-xl font-bold text-white mb-2">Novo Recorde! 🏆</h3>
@@ -281,7 +298,7 @@ const GameBoard: React.FC = () => {
                 disabled={isSaving}
                 className="bg-teal-500 hover:bg-teal-600 text-white font-bold py-2 px-4 rounded-lg transition-colors disabled:opacity-50"
               >
-                {isSaving ? 'Salvando...' : 'Salvar'}
+                Salvar
               </button>
             </div>
           </form>
@@ -336,7 +353,6 @@ const GameBoard: React.FC = () => {
                 {LEADERBOARD_API_URL ? "Ranking Global" : "Ranking Local"}
               </span>
               {isLoadingRecords && <span className="text-xs text-teal-400 animate-pulse">Sincronizando...</span>}
-              {!LEADERBOARD_API_URL && <span className="text-xs text-gray-500 font-normal">(apenas neste PC)</span>}
             </h3>
             
             {records.length > 0 ? (
@@ -352,9 +368,9 @@ const GameBoard: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-gray-700">
                     {records.map((record, index) => (
-                      <tr key={record.id} className="hover:bg-gray-750 transition-colors">
+                      <tr key={record.id} className={`transition-colors ${record.name === playerName ? 'bg-teal-900/30' : 'hover:bg-gray-750'}`}>
                         <td className="px-4 py-3 font-mono text-teal-500 font-bold">{index + 1}</td>
-                        <td className="px-4 py-3 font-medium text-white">{record.name}</td>
+                        <td className={`px-4 py-3 font-medium ${record.name === playerName ? 'text-teal-300' : 'text-white'}`}>{record.name}</td>
                         <td className="px-4 py-3 text-right font-mono text-gray-300">{formatTime(record.timeInSeconds)}</td>
                         <td className="px-4 py-3 text-right text-xs">{record.date}</td>
                       </tr>
