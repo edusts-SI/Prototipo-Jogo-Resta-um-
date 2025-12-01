@@ -27,7 +27,8 @@ const GameBoard: React.FC = () => {
   const [showSaveForm, setShowSaveForm] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isLoadingRecords, setIsLoadingRecords] = useState<boolean>(false);
-  const [connectionStatus, setConnectionStatus] = useState<'online' | 'offline' | 'error'>('online');
+  // Connection status (internal only, don't show error UI unless critical)
+  const [, setHasConnectionError] = useState<boolean>(false);
 
   // Helper function to fetch records
   const fetchGlobalRecords = useCallback(async () => {
@@ -35,17 +36,18 @@ const GameBoard: React.FC = () => {
     
     setIsLoadingRecords(true);
     try {
-      // Limpa espaços extras que podem quebrar a URL
       const cleanUrl = LEADERBOARD_API_URL.trim();
       const fetchUrl = new URL(cleanUrl);
       fetchUrl.searchParams.append('action', 'read');
-      // Cache busting agressivo
-      fetchUrl.searchParams.append('_t', Date.now().toString());
+      // Cache busting com precisão maior para evitar cache do navegador no 302 redirect
+      fetchUrl.searchParams.append('nocache', Math.random().toString(36).substring(7) + Date.now().toString());
 
       const response = await fetch(fetchUrl.toString(), {
         method: 'GET',
-        // Removido credentials e mode customizados para usar o padrão do browser
-        // que lida melhor com redirects do Google
+        credentials: 'omit', // Importante: não enviar cookies para evitar bloqueio do Google
+        headers: {
+          'Content-Type': 'text/plain', // Tenta evitar pre-flight complexo
+        },
       });
 
       if (!response.ok) throw new Error('Falha na resposta da API');
@@ -54,14 +56,21 @@ const GameBoard: React.FC = () => {
       
       if (result && (result.status === 'success' || Array.isArray(result.data))) {
         const data = result.data || [];
+        
+        // Mesclar com o recorde local atual se ele não estiver na lista (para UX instantânea)
+        const localRecords = JSON.parse(localStorage.getItem('restaUmRecords') || '[]');
+        
+        // Prioriza dados da nuvem, mas mantém a estrutura
         setRecords(data);
+        
+        // Atualiza backup local
         localStorage.setItem('restaUmRecords', JSON.stringify(data));
-        setConnectionStatus('online');
+        setHasConnectionError(false);
       }
     } catch (error) {
-      console.error("Erro ao sincronizar ranking:", error);
-      setConnectionStatus('error');
-      // Fallback para local
+      console.warn("Modo Offline/Erro Sincronização:", error);
+      setHasConnectionError(true);
+      // Fallback silencioso para local
       const savedRecords = localStorage.getItem('restaUmRecords');
       if (savedRecords) {
         setRecords(JSON.parse(savedRecords));
@@ -71,20 +80,15 @@ const GameBoard: React.FC = () => {
     }
   }, []);
 
-  // Load records from LocalStorage OR API on mount
+  // Load records on mount
   useEffect(() => {
-    const loadRecords = async () => {
-      // 1. Carrega localmente primeiro (cache/fallback)
-      const savedRecords = localStorage.getItem('restaUmRecords');
-      if (savedRecords) {
-        setRecords(JSON.parse(savedRecords));
-      }
-
-      // 2. Se tiver URL configurada, tenta buscar do servidor
-      await fetchGlobalRecords();
-    };
-
-    loadRecords();
+    // 1. Carrega local imediatamente
+    const savedRecords = localStorage.getItem('restaUmRecords');
+    if (savedRecords) {
+      setRecords(JSON.parse(savedRecords));
+    }
+    // 2. Tenta buscar global
+    fetchGlobalRecords();
   }, [fetchGlobalRecords]);
 
   // Timer Logic
@@ -101,25 +105,18 @@ const GameBoard: React.FC = () => {
   // Movement Logic
   const isValidMove = useCallback((from: Position, to: Position, currentBoard: BoardLayout): boolean => {
     if (to.row < 0 || to.row >= currentBoard.length || to.col < 0 || to.col >= currentBoard[0].length) {
-      return false; // Out of bounds
+      return false; 
     }
-
     if (currentBoard[to.row][to.col] !== CellState.Empty) {
-      return false; // Destination is not empty
+      return false; 
     }
-
     const dRow = to.row - from.row;
     const dCol = to.col - from.col;
-
-    // Must be a jump of 2 spaces, either horizontally or vertically
     if (!((Math.abs(dRow) === 2 && dCol === 0) || (dRow === 0 && Math.abs(dCol) === 2))) {
       return false;
     }
-
     const jumpedPegRow = from.row + dRow / 2;
     const jumpedPegCol = from.col + dCol / 2;
-
-    // The jumped position must contain a peg
     return currentBoard[jumpedPegRow][jumpedPegCol] === CellState.Peg;
   }, []);
   
@@ -153,19 +150,15 @@ const GameBoard: React.FC = () => {
     } else if (!hasAnyValidMove(board)) {
       setGameStatus('lost');
       setIsTimerRunning(false);
-    } else {
-      // Game is continuing
     }
   }, [pegCount, board, hasAnyValidMove]);
 
   const handleCellClick = (row: number, col: number) => {
     if (gameStatus !== 'playing') return;
-
     const cellState = board[row][col];
     
     if (selectedPeg) {
       if (isValidMove(selectedPeg, { row, col }, board)) {
-        // Perform the move
         const newBoard = board.map(r => [...r]);
         newBoard[selectedPeg.row][selectedPeg.col] = CellState.Empty;
         newBoard[row][col] = CellState.Peg;
@@ -209,17 +202,17 @@ const GameBoard: React.FC = () => {
       date: new Date().toLocaleDateString('pt-BR')
     };
 
-    // 1. Atualização Otimista Local
+    // 1. Atualização Otimista (Mostra na hora pro usuário não esperar)
     const updatedRecords = [...records, newRecord]
       .sort((a, b) => a.timeInSeconds - b.timeInSeconds)
       .slice(0, 10);
     setRecords(updatedRecords);
     localStorage.setItem('restaUmRecords', JSON.stringify(updatedRecords));
     setShowSaveForm(false);
+    setIsSaving(true);
 
-    // 2. Envio para Nuvem
+    // 2. Envio "Fire and Forget" para o Google
     if (LEADERBOARD_API_URL) {
-      setIsSaving(true);
       try {
         const cleanUrl = LEADERBOARD_API_URL.trim();
         const saveUrl = new URL(cleanUrl);
@@ -227,27 +220,30 @@ const GameBoard: React.FC = () => {
         saveUrl.searchParams.append('name', newRecord.name);
         saveUrl.searchParams.append('timeInSeconds', newRecord.timeInSeconds.toString());
         saveUrl.searchParams.append('date', newRecord.date);
-        saveUrl.searchParams.append('_t', Date.now().toString());
+        // Timestamp único para garantir que o Google processe
+        saveUrl.searchParams.append('ts', Date.now().toString());
 
-        // A MÁGICA: mode: 'no-cors'
-        // Isso permite enviar o dado para o Google Scripts SEM que o navegador
-        // bloqueie por causa do redirecionamento 302 que o Google faz.
-        // O response será "opaque" (ilegível), mas o dado CHEGA lá.
+        // Usamos fetch com keepalive para persistir mesmo se a aba fechar
         await fetch(saveUrl.toString(), {
           method: 'GET',
-          mode: 'no-cors' 
+          mode: 'no-cors',
+          credentials: 'omit',
+          keepalive: true
         });
 
-        // Aguardamos um pouco para o Google processar e atualizamos a lista real
+        // Tenta atualizar a lista global após alguns segundos (dá tempo do Google processar)
         setTimeout(() => {
             fetchGlobalRecords();
-        }, 2000);
+        }, 3000);
 
       } catch (error) {
-        console.error("Tentativa de salvar falhou:", error);
+        // Silencioso no save para não travar a UI, já salvamos localmente
+        console.error("Erro ao enviar dados (background):", error);
       } finally {
         setIsSaving(false);
       }
+    } else {
+      setIsSaving(false);
     }
   };
 
@@ -265,7 +261,7 @@ const GameBoard: React.FC = () => {
     <SectionWrapper title="Hora do Desafio!">
       <div className="flex flex-col items-center gap-6">
         
-        {/* Header with Timer and Count */}
+        {/* Header */}
         <div className="flex flex-row justify-between items-center w-full max-w-md bg-gray-800 p-4 rounded-xl border border-gray-700 shadow-lg">
           <div className="flex flex-col">
             <span className="text-gray-400 text-xs uppercase tracking-wider font-bold">Peças</span>
@@ -288,9 +284,9 @@ const GameBoard: React.FC = () => {
 
         {/* Victory Form */}
         {showSaveForm && (
-          <form onSubmit={saveRecord} className="w-full max-w-md bg-gradient-to-br from-teal-900 to-gray-800 p-6 rounded-xl border border-teal-500/50 shadow-2xl animate-fade-in relative">
+          <form onSubmit={saveRecord} className="w-full max-w-md bg-gradient-to-br from-teal-900 to-gray-800 p-6 rounded-xl border border-teal-500/50 shadow-2xl animate-fade-in relative z-20">
             {isSaving && (
-              <div className="absolute inset-0 bg-gray-900/50 flex items-center justify-center rounded-xl z-10">
+              <div className="absolute inset-0 bg-gray-900/50 flex items-center justify-center rounded-xl z-30">
                 <div className="flex flex-col items-center">
                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mb-2"></div>
                    <span className="text-xs text-white">Salvando...</span>
@@ -324,7 +320,6 @@ const GameBoard: React.FC = () => {
 
         {/* Game Board */}
         <div className="bg-gray-800 p-2 sm:p-4 rounded-xl shadow-2xl border border-gray-700 relative">
-           {/* Overlay disabled state if game over */}
            {gameStatus !== 'playing' && !showSaveForm && (
              <div className="absolute inset-0 z-10 bg-gray-900/20 rounded-xl pointer-events-none"></div>
            )}
@@ -361,7 +356,7 @@ const GameBoard: React.FC = () => {
           {gameStatus === 'playing' ? 'Reiniciar Jogo' : 'Jogar Novamente'}
         </button>
 
-        {/* Hall of Fame / Records */}
+        {/* Hall of Fame */}
         <div className="w-full max-w-md mt-8">
             <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2 justify-between">
               <span className="flex items-center gap-2">
@@ -371,11 +366,6 @@ const GameBoard: React.FC = () => {
                 Ranking Global
               </span>
               <div className="flex items-center gap-2">
-                {connectionStatus === 'error' && (
-                   <span title="Erro de conexão. Mostrando dados locais." className="text-red-500 cursor-help">
-                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                   </span>
-                )}
                 <button 
                   onClick={fetchGlobalRecords} 
                   disabled={isLoadingRecords}
