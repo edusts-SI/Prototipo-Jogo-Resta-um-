@@ -27,6 +27,7 @@ const GameBoard: React.FC = () => {
   const [showSaveForm, setShowSaveForm] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isLoadingRecords, setIsLoadingRecords] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<'online' | 'offline' | 'error'>('online');
 
   // Helper function to fetch records
   const fetchGlobalRecords = useCallback(async () => {
@@ -34,15 +35,17 @@ const GameBoard: React.FC = () => {
     
     setIsLoadingRecords(true);
     try {
-      // ADICIONADO: Cache busting (_t) para evitar que o navegador mostre dados velhos
-      const fetchUrl = new URL(LEADERBOARD_API_URL);
+      // Limpa espaços extras que podem quebrar a URL
+      const cleanUrl = LEADERBOARD_API_URL.trim();
+      const fetchUrl = new URL(cleanUrl);
       fetchUrl.searchParams.append('action', 'read');
+      // Cache busting agressivo
       fetchUrl.searchParams.append('_t', Date.now().toString());
 
       const response = await fetch(fetchUrl.toString(), {
         method: 'GET',
-        // IMPORTANTE: 'omit' impede envio de cookies que causam erro de CORS no Google
-        credentials: 'omit', 
+        // Removido credentials e mode customizados para usar o padrão do browser
+        // que lida melhor com redirects do Google
       });
 
       if (!response.ok) throw new Error('Falha na resposta da API');
@@ -53,9 +56,16 @@ const GameBoard: React.FC = () => {
         const data = result.data || [];
         setRecords(data);
         localStorage.setItem('restaUmRecords', JSON.stringify(data));
+        setConnectionStatus('online');
       }
     } catch (error) {
       console.error("Erro ao sincronizar ranking:", error);
+      setConnectionStatus('error');
+      // Fallback para local
+      const savedRecords = localStorage.getItem('restaUmRecords');
+      if (savedRecords) {
+        setRecords(JSON.parse(savedRecords));
+      }
     } finally {
       setIsLoadingRecords(false);
     }
@@ -199,7 +209,7 @@ const GameBoard: React.FC = () => {
       date: new Date().toLocaleDateString('pt-BR')
     };
 
-    // 1. Atualização Otimista: Mostra imediatamente
+    // 1. Atualização Otimista Local
     const updatedRecords = [...records, newRecord]
       .sort((a, b) => a.timeInSeconds - b.timeInSeconds)
       .slice(0, 10);
@@ -211,30 +221,30 @@ const GameBoard: React.FC = () => {
     if (LEADERBOARD_API_URL) {
       setIsSaving(true);
       try {
-        const apiUrl = LEADERBOARD_API_URL.trim();
-        const saveUrl = new URL(apiUrl);
+        const cleanUrl = LEADERBOARD_API_URL.trim();
+        const saveUrl = new URL(cleanUrl);
         saveUrl.searchParams.append('id', newRecord.id);
         saveUrl.searchParams.append('name', newRecord.name);
         saveUrl.searchParams.append('timeInSeconds', newRecord.timeInSeconds.toString());
         saveUrl.searchParams.append('date', newRecord.date);
-        // Cache busting para garantir que o pedido saia
         saveUrl.searchParams.append('_t', Date.now().toString());
 
+        // A MÁGICA: mode: 'no-cors'
+        // Isso permite enviar o dado para o Google Scripts SEM que o navegador
+        // bloqueie por causa do redirecionamento 302 que o Google faz.
+        // O response será "opaque" (ilegível), mas o dado CHEGA lá.
         await fetch(saveUrl.toString(), {
           method: 'GET',
-          // 'omit' é o segredo para funcionar com Google Scripts via AJAX
-          credentials: 'omit',
-          mode: 'cors' 
+          mode: 'no-cors' 
         });
 
-        // Aguarda propagação e atualiza
+        // Aguardamos um pouco para o Google processar e atualizamos a lista real
         setTimeout(() => {
             fetchGlobalRecords();
-        }, 1500);
+        }, 2000);
 
       } catch (error) {
         console.error("Tentativa de salvar falhou:", error);
-        // Mesmo falhando, o usuário já viu o recorde localmente (otimista)
       } finally {
         setIsSaving(false);
       }
@@ -283,7 +293,7 @@ const GameBoard: React.FC = () => {
               <div className="absolute inset-0 bg-gray-900/50 flex items-center justify-center rounded-xl z-10">
                 <div className="flex flex-col items-center">
                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mb-2"></div>
-                   <span className="text-xs text-white">Salvando Globalmente...</span>
+                   <span className="text-xs text-white">Salvando...</span>
                 </div>
               </div>
             )}
@@ -358,9 +368,25 @@ const GameBoard: React.FC = () => {
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
                   <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.699-3.181a1 1 0 011.827 1.035l-1.155 2.156A8.99 8.99 0 0118 8v8a1 1 0 11-2 0V9.414l-2.121 2.122a1 1 0 000 1.414 1 1 0 001.414 0l2.829-2.829a1 1 0 00-1.415-1.414L15.32 10.12A6.974 6.974 0 0014 6.315V16a3 3 0 11-6 0V6.315a6.974 6.974 0 00-1.32 3.805l1.393-1.393a1 1 0 10-1.414 1.414l2.828 2.829a1 1 0 001.414 0 1 1 0 000-1.414l-2.121-2.122V16a1 1 0 11-2 0V8c0-1.636.425-3.166 1.16-4.506l-1.155-2.156a1 1 0 011.827-1.035L8 5.323V3a1 1 0 011-1z" clipRule="evenodd" />
                 </svg>
-                {LEADERBOARD_API_URL ? "Ranking Global" : "Ranking Local"}
+                Ranking Global
               </span>
-              {isLoadingRecords && <span className="text-xs text-teal-400 animate-pulse">Sincronizando...</span>}
+              <div className="flex items-center gap-2">
+                {connectionStatus === 'error' && (
+                   <span title="Erro de conexão. Mostrando dados locais." className="text-red-500 cursor-help">
+                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                   </span>
+                )}
+                <button 
+                  onClick={fetchGlobalRecords} 
+                  disabled={isLoadingRecords}
+                  className="p-1 rounded hover:bg-gray-700 transition-colors"
+                  title="Atualizar Ranking"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 text-teal-400 ${isLoadingRecords ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
             </h3>
             
             {records.length > 0 ? (
@@ -388,7 +414,9 @@ const GameBoard: React.FC = () => {
               </div>
             ) : (
                <div className="bg-gray-800/50 rounded-xl p-8 border border-gray-700 border-dashed text-center">
-                 <p className="text-gray-500">Ainda não há recordes. Seja o primeiro a vencer!</p>
+                 <p className="text-gray-500">
+                   {isLoadingRecords ? 'Carregando ranking...' : 'Ainda não há recordes. Seja o primeiro a vencer!'}
+                 </p>
                </div>
             )}
         </div>
