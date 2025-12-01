@@ -29,24 +29,37 @@ const GameBoard: React.FC = () => {
   const [isLoadingRecords, setIsLoadingRecords] = useState<boolean>(false);
 
   // Helper function to fetch records
-  const fetchGlobalRecords = async () => {
+  const fetchGlobalRecords = useCallback(async () => {
     if (!LEADERBOARD_API_URL) return;
     
     setIsLoadingRecords(true);
     try {
-      const response = await fetch(LEADERBOARD_API_URL);
+      // ADICIONADO: Cache busting (_t) para evitar que o navegador mostre dados velhos
+      const fetchUrl = new URL(LEADERBOARD_API_URL);
+      fetchUrl.searchParams.append('action', 'read');
+      fetchUrl.searchParams.append('_t', Date.now().toString());
+
+      const response = await fetch(fetchUrl.toString(), {
+        method: 'GET',
+        // IMPORTANTE: 'omit' impede envio de cookies que causam erro de CORS no Google
+        credentials: 'omit', 
+      });
+
+      if (!response.ok) throw new Error('Falha na resposta da API');
+
       const result = await response.json();
       
-      if (result && result.status === 'success' && Array.isArray(result.data)) {
-        setRecords(result.data);
-        localStorage.setItem('restaUmRecords', JSON.stringify(result.data));
+      if (result && (result.status === 'success' || Array.isArray(result.data))) {
+        const data = result.data || [];
+        setRecords(data);
+        localStorage.setItem('restaUmRecords', JSON.stringify(data));
       }
     } catch (error) {
       console.error("Erro ao sincronizar ranking:", error);
     } finally {
       setIsLoadingRecords(false);
     }
-  };
+  }, []);
 
   // Load records from LocalStorage OR API on mount
   useEffect(() => {
@@ -62,7 +75,7 @@ const GameBoard: React.FC = () => {
     };
 
     loadRecords();
-  }, []);
+  }, [fetchGlobalRecords]);
 
   // Timer Logic
   useEffect(() => {
@@ -186,17 +199,15 @@ const GameBoard: React.FC = () => {
       date: new Date().toLocaleDateString('pt-BR')
     };
 
-    // 1. Atualização Otimista Local: Mostra o recorde imediatamente para o usuário
-    // Isso garante que ele veja que "funcionou" mesmo que a internet esteja lenta
+    // 1. Atualização Otimista: Mostra imediatamente
     const updatedRecords = [...records, newRecord]
       .sort((a, b) => a.timeInSeconds - b.timeInSeconds)
       .slice(0, 10);
-
     setRecords(updatedRecords);
     localStorage.setItem('restaUmRecords', JSON.stringify(updatedRecords));
     setShowSaveForm(false);
 
-    // 2. Envio para Nuvem (se configurado)
+    // 2. Envio para Nuvem
     if (LEADERBOARD_API_URL) {
       setIsSaving(true);
       try {
@@ -206,27 +217,24 @@ const GameBoard: React.FC = () => {
         saveUrl.searchParams.append('name', newRecord.name);
         saveUrl.searchParams.append('timeInSeconds', newRecord.timeInSeconds.toString());
         saveUrl.searchParams.append('date', newRecord.date);
+        // Cache busting para garantir que o pedido saia
+        saveUrl.searchParams.append('_t', Date.now().toString());
 
-        // MUDANÇA CRÍTICA: mode: 'no-cors'
-        // Isso envia a requisição "às cegas". O navegador não vai bloquear o redirecionamento
-        // do Google, mas também não vamos saber se o Google respondeu "OK".
-        // Assumimos que, se o link estiver certo, vai salvar.
         await fetch(saveUrl.toString(), {
           method: 'GET',
-          mode: 'no-cors',
+          // 'omit' é o segredo para funcionar com Google Scripts via AJAX
+          credentials: 'omit',
+          mode: 'cors' 
         });
 
-        // Aguarda um momento para o Google Sheets processar a escrita
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        // Tenta buscar a lista atualizada para garantir sincronia
-        // Se falhar aqui, não tem problema, o usuário já viu o recorde localmente.
-        await fetchGlobalRecords();
+        // Aguarda propagação e atualiza
+        setTimeout(() => {
+            fetchGlobalRecords();
+        }, 1500);
 
       } catch (error) {
-        console.error("Erro ao salvar no ranking global:", error);
-        // Não mostramos mais alert de erro para não frustrar o usuário,
-        // já que o recorde foi salvo localmente com sucesso.
+        console.error("Tentativa de salvar falhou:", error);
+        // Mesmo falhando, o usuário já viu o recorde localmente (otimista)
       } finally {
         setIsSaving(false);
       }
@@ -268,14 +276,14 @@ const GameBoard: React.FC = () => {
           </p>
         </div>
 
-        {/* Victory Form - Shows only when won and not saved yet */}
+        {/* Victory Form */}
         {showSaveForm && (
           <form onSubmit={saveRecord} className="w-full max-w-md bg-gradient-to-br from-teal-900 to-gray-800 p-6 rounded-xl border border-teal-500/50 shadow-2xl animate-fade-in relative">
             {isSaving && (
               <div className="absolute inset-0 bg-gray-900/50 flex items-center justify-center rounded-xl z-10">
                 <div className="flex flex-col items-center">
                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mb-2"></div>
-                   <span className="text-xs text-white">Salvando...</span>
+                   <span className="text-xs text-white">Salvando Globalmente...</span>
                 </div>
               </div>
             )}
