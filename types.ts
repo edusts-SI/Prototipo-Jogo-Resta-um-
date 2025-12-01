@@ -11,3 +11,10 @@ export interface Position {
   row: number;
   col: number;
 }
+
+export interface GameRecord {
+  id: string;
+  name: string;
+  timeInSeconds: number;
+  date: string;
+}
