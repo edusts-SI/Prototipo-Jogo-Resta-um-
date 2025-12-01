@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { SectionWrapper } from './SectionWrapper';
 import { BoardLayout, CellState, Position, GameRecord } from '../types';
-import { INITIAL_BOARD, TOTAL_PEGS_START } from '../constants';
+import { INITIAL_BOARD, TOTAL_PEGS_START, LEADERBOARD_API_URL } from '../constants';
 
 type GameStatus = 'playing' | 'won' | 'lost';
 
@@ -25,13 +25,40 @@ const GameBoard: React.FC = () => {
   const [playerName, setPlayerName] = useState<string>('');
   const [records, setRecords] = useState<GameRecord[]>([]);
   const [showSaveForm, setShowSaveForm] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isLoadingRecords, setIsLoadingRecords] = useState<boolean>(false);
 
-  // Load records from LocalStorage on mount
+  // Load records from LocalStorage OR API on mount
   useEffect(() => {
-    const savedRecords = localStorage.getItem('restaUmRecords');
-    if (savedRecords) {
-      setRecords(JSON.parse(savedRecords));
-    }
+    const loadRecords = async () => {
+      // 1. Carrega localmente primeiro (cache/fallback)
+      const savedRecords = localStorage.getItem('restaUmRecords');
+      if (savedRecords) {
+        setRecords(JSON.parse(savedRecords));
+      }
+
+      // 2. Se tiver URL configurada, tenta buscar do servidor
+      if (LEADERBOARD_API_URL) {
+        setIsLoadingRecords(true);
+        try {
+          const response = await fetch(LEADERBOARD_API_URL);
+          const result = await response.json();
+          
+          if (result && result.status === 'success' && Array.isArray(result.data)) {
+            setRecords(result.data);
+            // Atualiza o cache local
+            localStorage.setItem('restaUmRecords', JSON.stringify(result.data));
+          }
+        } catch (error) {
+          console.error("Erro ao conectar com o ranking global:", error);
+          // Falha silenciosa, mantém os dados locais
+        } finally {
+          setIsLoadingRecords(false);
+        }
+      }
+    };
+
+    loadRecords();
   }, []);
 
   // Timer Logic
@@ -144,9 +171,10 @@ const GameBoard: React.FC = () => {
     setPlayerName('');
   };
 
-  const saveRecord = (e: React.FormEvent) => {
+  const saveRecord = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!playerName.trim()) return;
+    if (isSaving) return;
 
     const newRecord: GameRecord = {
       id: Date.now().toString(),
@@ -155,14 +183,40 @@ const GameBoard: React.FC = () => {
       date: new Date().toLocaleDateString('pt-BR')
     };
 
-    // Add new record, sort by time (ascending), take top 10
+    // 1. Atualização Otimista Local
     const updatedRecords = [...records, newRecord]
       .sort((a, b) => a.timeInSeconds - b.timeInSeconds)
-      .slice(0, 10); // Keep top 10
+      .slice(0, 10);
 
     setRecords(updatedRecords);
     localStorage.setItem('restaUmRecords', JSON.stringify(updatedRecords));
     setShowSaveForm(false);
+
+    // 2. Envio para Nuvem (se configurado)
+    if (LEADERBOARD_API_URL) {
+      setIsSaving(true);
+      try {
+        // Enviamos como text/plain para o Google Apps Script aceitar sem preflight complexo
+        await fetch(LEADERBOARD_API_URL, {
+          method: 'POST',
+          body: JSON.stringify(newRecord)
+        });
+
+        // Recarrega para garantir consistência
+        const response = await fetch(LEADERBOARD_API_URL);
+        const result = await response.json();
+        
+        if (result && result.status === 'success' && Array.isArray(result.data)) {
+          setRecords(result.data);
+          localStorage.setItem('restaUmRecords', JSON.stringify(result.data));
+        }
+      } catch (error) {
+        console.error("Erro ao salvar no ranking global:", error);
+        alert("Aviso: Não foi possível salvar no ranking global. Seu recorde ficou salvo apenas neste dispositivo.");
+      } finally {
+        setIsSaving(false);
+      }
+    }
   };
 
   const getGameStatusMessage = () => {
@@ -202,7 +256,12 @@ const GameBoard: React.FC = () => {
 
         {/* Victory Form - Shows only when won and not saved yet */}
         {showSaveForm && (
-          <form onSubmit={saveRecord} className="w-full max-w-md bg-gradient-to-br from-teal-900 to-gray-800 p-6 rounded-xl border border-teal-500/50 shadow-2xl animate-fade-in">
+          <form onSubmit={saveRecord} className="w-full max-w-md bg-gradient-to-br from-teal-900 to-gray-800 p-6 rounded-xl border border-teal-500/50 shadow-2xl animate-fade-in relative">
+            {isSaving && (
+              <div className="absolute inset-0 bg-gray-900/50 flex items-center justify-center rounded-xl z-10">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500"></div>
+              </div>
+            )}
             <h3 className="text-xl font-bold text-white mb-2">Novo Recorde! 🏆</h3>
             <p className="text-gray-300 mb-4">Você terminou em <span className="font-bold text-white">{formatTime(timeElapsed)}</span>.</p>
             <div className="flex gap-2">
@@ -215,12 +274,14 @@ const GameBoard: React.FC = () => {
                 maxLength={20}
                 autoFocus
                 required
+                disabled={isSaving}
               />
               <button
                 type="submit"
-                className="bg-teal-500 hover:bg-teal-600 text-white font-bold py-2 px-4 rounded-lg transition-colors"
+                disabled={isSaving}
+                className="bg-teal-500 hover:bg-teal-600 text-white font-bold py-2 px-4 rounded-lg transition-colors disabled:opacity-50"
               >
-                Salvar
+                {isSaving ? 'Salvando...' : 'Salvar'}
               </button>
             </div>
           </form>
@@ -266,38 +327,47 @@ const GameBoard: React.FC = () => {
         </button>
 
         {/* Hall of Fame / Records */}
-        {records.length > 0 && (
-          <div className="w-full max-w-md mt-8">
-            <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.699-3.181a1 1 0 011.827 1.035l-1.155 2.156A8.99 8.99 0 0118 8v8a1 1 0 11-2 0V9.414l-2.121 2.122a1 1 0 000 1.414 1 1 0 001.414 0l2.829-2.829a1 1 0 00-1.415-1.414L15.32 10.12A6.974 6.974 0 0014 6.315V16a3 3 0 11-6 0V6.315a6.974 6.974 0 00-1.32 3.805l1.393-1.393a1 1 0 10-1.414 1.414l2.828 2.829a1 1 0 001.414 0 1 1 0 000-1.414l-2.121-2.122V16a1 1 0 11-2 0V8c0-1.636.425-3.166 1.16-4.506l-1.155-2.156a1 1 0 011.827-1.035L8 5.323V3a1 1 0 011-1z" clipRule="evenodd" />
-              </svg>
-              Hall da Fama
+        <div className="w-full max-w-md mt-8">
+            <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2 justify-between">
+              <span className="flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.699-3.181a1 1 0 011.827 1.035l-1.155 2.156A8.99 8.99 0 0118 8v8a1 1 0 11-2 0V9.414l-2.121 2.122a1 1 0 000 1.414 1 1 0 001.414 0l2.829-2.829a1 1 0 00-1.415-1.414L15.32 10.12A6.974 6.974 0 0014 6.315V16a3 3 0 11-6 0V6.315a6.974 6.974 0 00-1.32 3.805l1.393-1.393a1 1 0 10-1.414 1.414l2.828 2.829a1 1 0 001.414 0 1 1 0 000-1.414l-2.121-2.122V16a1 1 0 11-2 0V8c0-1.636.425-3.166 1.16-4.506l-1.155-2.156a1 1 0 011.827-1.035L8 5.323V3a1 1 0 011-1z" clipRule="evenodd" />
+                </svg>
+                {LEADERBOARD_API_URL ? "Ranking Global" : "Ranking Local"}
+              </span>
+              {isLoadingRecords && <span className="text-xs text-teal-400 animate-pulse">Sincronizando...</span>}
+              {!LEADERBOARD_API_URL && <span className="text-xs text-gray-500 font-normal">(apenas neste PC)</span>}
             </h3>
-            <div className="bg-gray-800 rounded-xl overflow-hidden border border-gray-700">
-              <table className="w-full text-left text-sm text-gray-400">
-                <thead className="bg-gray-700 text-gray-200 uppercase font-bold text-xs">
-                  <tr>
-                    <th className="px-4 py-3">#</th>
-                    <th className="px-4 py-3">Nome</th>
-                    <th className="px-4 py-3 text-right">Tempo</th>
-                    <th className="px-4 py-3 text-right">Data</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-700">
-                  {records.map((record, index) => (
-                    <tr key={record.id} className="hover:bg-gray-750 transition-colors">
-                      <td className="px-4 py-3 font-mono text-teal-500 font-bold">{index + 1}</td>
-                      <td className="px-4 py-3 font-medium text-white">{record.name}</td>
-                      <td className="px-4 py-3 text-right font-mono text-gray-300">{formatTime(record.timeInSeconds)}</td>
-                      <td className="px-4 py-3 text-right text-xs">{record.date}</td>
+            
+            {records.length > 0 ? (
+              <div className="bg-gray-800 rounded-xl overflow-hidden border border-gray-700">
+                <table className="w-full text-left text-sm text-gray-400">
+                  <thead className="bg-gray-700 text-gray-200 uppercase font-bold text-xs">
+                    <tr>
+                      <th className="px-4 py-3">#</th>
+                      <th className="px-4 py-3">Nome</th>
+                      <th className="px-4 py-3 text-right">Tempo</th>
+                      <th className="px-4 py-3 text-right">Data</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+                  </thead>
+                  <tbody className="divide-y divide-gray-700">
+                    {records.map((record, index) => (
+                      <tr key={record.id} className="hover:bg-gray-750 transition-colors">
+                        <td className="px-4 py-3 font-mono text-teal-500 font-bold">{index + 1}</td>
+                        <td className="px-4 py-3 font-medium text-white">{record.name}</td>
+                        <td className="px-4 py-3 text-right font-mono text-gray-300">{formatTime(record.timeInSeconds)}</td>
+                        <td className="px-4 py-3 text-right text-xs">{record.date}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+               <div className="bg-gray-800/50 rounded-xl p-8 border border-gray-700 border-dashed text-center">
+                 <p className="text-gray-500">Ainda não há recordes. Seja o primeiro a vencer!</p>
+               </div>
+            )}
+        </div>
       </div>
     </SectionWrapper>
   );
